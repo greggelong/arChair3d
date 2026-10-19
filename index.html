@@ -907,16 +907,37 @@
             /* ---------- WebXR AR ---------- */
             $("oAR").onclick = async () => {
                 $("msg").textContent = "";
-                try {
-                    session = await navigator.xr.requestSession("immersive-ar", {
-                        requiredFeatures: ["hit-test"],
-                        optionalFeatures: ["dom-overlay", "local-floor"],
-                        domOverlay: {
-                            root: $("ui"),
-                        },
-                    });
-                } catch (e) {
-                    $("msg").textContent = "Could not start AR: " + (e.message || e);
+                // The DOM-overlay root must be visible when the session starts.
+                $("start").style.display = "none";
+                $("ui").style.display = "block";
+                // Try the full setup first, then step down for phones that reject it
+                // ("The specified session configuration is not supported").
+                const tries = [
+                    { req: ["hit-test"], opt: ["dom-overlay", "local-floor"], ov: true },
+                    { req: ["hit-test"], opt: ["local-floor"], ov: false },
+                    { req: [], opt: ["hit-test", "dom-overlay", "local-floor"], ov: true },
+                    { req: [], opt: ["hit-test", "local-floor"], ov: false },
+                    { req: [], opt: [], ov: false },
+                ];
+                let lastErr = null;
+                session = null;
+                for (const t of tries) {
+                    try {
+                        const init = { requiredFeatures: t.req, optionalFeatures: t.opt };
+                        if (t.ov) init.domOverlay = { root: $("ui") };
+                        session = await navigator.xr.requestSession("immersive-ar", init);
+                        break;
+                    } catch (e) {
+                        lastErr = e;
+                    }
+                }
+                if (!session) {
+                    $("ui").style.display = "none";
+                    $("start").style.display = "flex";
+                    $("msg").textContent =
+                        "Could not start AR: " +
+                        ((lastErr && (lastErr.message || lastErr.name)) || "unknown error") +
+                        ". Update Chrome and Google Play Services for AR, or use Camera view.";
                     return;
                 }
                 mode = "ar";
@@ -924,14 +945,36 @@
                 renderer.xr.setReferenceSpaceType("local");
                 await renderer.xr.setSession(session);
                 refSpace = renderer.xr.getReferenceSpace();
-                const viewer = await session.requestReferenceSpace("viewer");
-                hitSource = await session.requestHitTestSource({
-                    space: viewer,
-                });
+                hitSource = null;
+                try {
+                    const viewer = await session.requestReferenceSpace("viewer");
+                    hitSource = await session.requestHitTestSource({
+                        space: viewer,
+                    });
+                } catch (e) {
+                    hitSource = null;
+                }
                 session.addEventListener("select", () => {
-                    if (reticleOK) {
-                        tmpV.setFromMatrixPosition(reticle.matrix);
-                        placeAt(tmpV.clone());
+                    if (hitSource) {
+                        if (reticleOK) {
+                            tmpV.setFromMatrixPosition(reticle.matrix);
+                            placeAt(tmpV.clone());
+                        }
+                    } else {
+                        // no floor detection on this phone: drop it 2 m ahead, ~1.3 m below the camera
+                        const f = new THREE.Vector3(0, 0, -1).transformDirection(
+                            camera.matrixWorld,
+                        );
+                        f.y = 0;
+                        f.normalize();
+                        camPos(tmpV);
+                        placeAt(
+                            new THREE.Vector3(
+                                tmpV.x + f.x * 2,
+                                tmpV.y - 1.3,
+                                tmpV.z + f.z * 2,
+                            ),
+                        );
                     }
                 });
                 session.addEventListener("end", () => {
@@ -952,7 +995,9 @@
                 $("ui").style.display = "block";
                 refreshButtons();
                 setHint(
-                    "Point at the floor and move slowly until the ring appears, then tap to place.",
+                    hitSource
+                        ? "Point at the floor and move slowly until the ring appears, then tap to place."
+                        : "This phone can't detect the floor. Tap to place the chairs about 2 m in front of you.",
                 );
             };
 
